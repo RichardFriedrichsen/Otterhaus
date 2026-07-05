@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import Chore, ChoreCompletion, House, HouseInvite, Room
+from .models import Chore, ChoreCompletion, House, Room
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -31,11 +31,14 @@ class UserSerializer(serializers.ModelSerializer):
 class ChoreCompletionSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     chore_name = serializers.CharField(source="chore.name", read_only=True)
-    room_name = serializers.CharField(source="chore.room.name", read_only=True)
+    room_name = serializers.SerializerMethodField()
 
     class Meta:
         model = ChoreCompletion
         fields = ("id", "user", "chore_name", "room_name", "completed_at")
+
+    def get_room_name(self, obj):
+        return obj.chore.room.name if obj.chore.room else None
 
 
 class ChoreSerializer(serializers.ModelSerializer):
@@ -44,21 +47,53 @@ class ChoreSerializer(serializers.ModelSerializer):
     days_overdue = serializers.IntegerField(read_only=True)
     last_completed_by = serializers.SerializerMethodField()
     last_completed_at = serializers.SerializerMethodField()
-    room_name = serializers.CharField(source="room.name", read_only=True)
-    house_id = serializers.IntegerField(source="room.house_id", read_only=True)
-    house_name = serializers.CharField(source="room.house.name", read_only=True)
+    room_name = serializers.CharField(source="room.name", read_only=True, default=None)
+    house = serializers.PrimaryKeyRelatedField(
+        queryset=House.objects.all(), required=False, allow_null=True
+    )
+    house_name = serializers.CharField(source="house.name", read_only=True, default=None)
+    assigned_to = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=User.objects.all(), required=False
+    )
+    assigned_to_detail = UserSerializer(source="assigned_to", many=True, read_only=True)
 
     class Meta:
         model = Chore
         fields = (
-            "id", "room", "room_name", "house_id", "house_name", "name",
-            "description", "interval_days", "is_active", "due_date",
+            "id", "task_type", "room", "room_name", "house", "house_name", "name",
+            "description", "interval_days", "recurrence_type", "start_date",
+            "is_active", "assigned_to", "assigned_to_detail", "due_date",
             "is_due", "days_overdue", "last_completed_by", "last_completed_at",
         )
         extra_kwargs = {
-            "room": {"required": False},
+            "room": {"required": False, "allow_null": True},
             "is_active": {"default": True},
         }
+
+    def validate(self, attrs):
+        task_type = attrs.get("task_type", getattr(self.instance, "task_type", Chore.TASK_PLANNED))
+        room = attrs.get("room", getattr(self.instance, "room", None))
+        house = attrs.get("house", getattr(self.instance, "house", None))
+        interval_days = attrs.get("interval_days", getattr(self.instance, "interval_days", None))
+        recurrence_type = attrs.get(
+            "recurrence_type", getattr(self.instance, "recurrence_type", Chore.RECURRENCE_FLOATING)
+        )
+        start_date = attrs.get("start_date", getattr(self.instance, "start_date", None))
+
+        if task_type == Chore.TASK_PLANNED:
+            if room is None:
+                raise serializers.ValidationError({"room": "Required for planned tasks."})
+            if not interval_days:
+                raise serializers.ValidationError({"interval_days": "Required for planned tasks."})
+            if recurrence_type == Chore.RECURRENCE_FIXED and not start_date:
+                raise serializers.ValidationError(
+                    {"start_date": "Required when recurrence type is 'fixed'."}
+                )
+        elif room is None and house is None:
+            raise serializers.ValidationError(
+                {"house": "Required for a one-time task that isn't tied to a room."}
+            )
+        return attrs
 
     def get_last_completed_by(self, obj):
         last = obj.last_completion
@@ -78,24 +113,11 @@ class RoomSerializer(serializers.ModelSerializer):
         extra_kwargs = {"house": {"required": False}}
 
 
-class HouseInviteSerializer(serializers.ModelSerializer):
-    invited_by = UserSerializer(read_only=True)
-
-    class Meta:
-        model = HouseInvite
-        fields = ("id", "email", "accepted", "invited_by", "created_at")
-
-
 class HouseSerializer(serializers.ModelSerializer):
     members = UserSerializer(many=True, read_only=True)
     rooms = RoomSerializer(many=True, read_only=True)
-    invites = serializers.SerializerMethodField()
 
     class Meta:
         model = House
-        fields = ("id", "name", "created_by", "members", "rooms", "invites", "created_at")
-        read_only_fields = ("created_by",)
-
-    def get_invites(self, obj):
-        pending = obj.invites.filter(accepted=False)
-        return HouseInviteSerializer(pending, many=True).data
+        fields = ("id", "name", "created_by", "members", "rooms", "access_code", "created_at")
+        read_only_fields = ("created_by", "access_code")

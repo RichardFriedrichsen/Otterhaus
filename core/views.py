@@ -1,19 +1,23 @@
+from datetime import timedelta
+
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import emails
-from .models import Chore, ChoreCompletion, House, HouseInvite, Membership, Room
+from .models import Chore, ChoreCompletion, House, Membership, Room
 from .serializers import (
     ChoreCompletionSerializer, ChoreSerializer, HouseSerializer,
     RegisterSerializer, RoomSerializer, UserSerializer,
@@ -31,11 +35,6 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        # Apply any pending house invites that were sent to this email.
-        for invite in HouseInvite.objects.filter(email__iexact=user.email, accepted=False):
-            Membership.objects.get_or_create(user=user, house=invite.house)
-            invite.accepted = True
-            invite.save()
         token, _ = Token.objects.get_or_create(user=user)
         return Response(
             {"token": token.key, "user": UserSerializer(user).data},
@@ -97,7 +96,7 @@ def me(request):
 
 
 # --------------------------------------------------------------------------
-# Houses & invites
+# Houses
 # --------------------------------------------------------------------------
 
 class HouseViewSet(viewsets.ModelViewSet):
@@ -110,26 +109,24 @@ class HouseViewSet(viewsets.ModelViewSet):
         house = serializer.save(created_by=self.request.user)
         Membership.objects.create(user=self.request.user, house=house)
 
-    @action(detail=True, methods=["post"])
-    def invite(self, request, pk=None):
-        house = self.get_object()
-        email = request.data.get("email", "").strip()
-        if not email:
-            return Response({"detail": "Email is required."}, status=400)
-        if house.members.filter(email__iexact=email).exists():
-            return Response({"detail": "That person is already a member."}, status=400)
-        invite, created = HouseInvite.objects.get_or_create(
-            house=house, email=email, defaults={"invited_by": request.user}
-        )
-        if not created and invite.accepted:
-            return Response({"detail": "That invite was already accepted."}, status=400)
-        emails.send_invite_email(invite)
-        return Response({"detail": f"Invite sent to {email}."}, status=201)
+    @action(detail=False, methods=["post"])
+    def join(self, request):
+        code = request.data.get("code", "").strip().upper()
+        if not code:
+            return Response({"detail": "Access code is required."}, status=400)
+        house = House.objects.filter(access_code=code).first()
+        if house is None:
+            return Response({"detail": "That access code doesn't match any house."}, status=400)
+        if house.members.filter(pk=request.user.pk).exists():
+            return Response({"detail": "You're already a member of that house."}, status=400)
+        Membership.objects.create(user=request.user, house=house)
+        return Response({"detail": f"You joined '{house.name}'.",
+                         "house": HouseSerializer(house).data})
 
     @action(detail=True, methods=["get"])
     def scoreboard(self, request, pk=None):
         house = self.get_object()
-        completions = ChoreCompletion.objects.filter(chore__room__house=house)
+        completions = ChoreCompletion.objects.filter(chore__house=house)
         scores = []
         for member in house.members.all():
             user_completions = completions.filter(user=member)
@@ -145,20 +142,6 @@ class HouseViewSet(viewsets.ModelViewSet):
         return Response({"scores": scores, "recent": recent})
 
 
-@api_view(["POST"])
-def accept_invite(request):
-    token = request.data.get("token", "")
-    try:
-        invite = HouseInvite.objects.get(token=token, accepted=False)
-    except (HouseInvite.DoesNotExist, DjangoValidationError, ValueError):
-        return Response({"detail": "Invite is invalid or already used."}, status=400)
-    Membership.objects.get_or_create(user=request.user, house=invite.house)
-    invite.accepted = True
-    invite.save()
-    return Response({"detail": f"You joined '{invite.house.name}'.",
-                     "house": HouseSerializer(invite.house).data})
-
-
 # --------------------------------------------------------------------------
 # Rooms & chores
 # --------------------------------------------------------------------------
@@ -172,7 +155,6 @@ class RoomViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         house = serializer.validated_data.get("house")
         if house is None or not house.members.filter(pk=self.request.user.pk).exists():
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You are not a member of that house.")
         serializer.save()
 
@@ -181,19 +163,54 @@ class ChoreViewSet(viewsets.ModelViewSet):
     serializer_class = ChoreSerializer
 
     def get_queryset(self):
-        return Chore.objects.filter(room__house__members=self.request.user).distinct()
+        return Chore.objects.filter(house__members=self.request.user).distinct()
+
+    def _resolve_house(self, serializer):
+        """A chore's house is always the room's house when a room is given,
+        otherwise it must be supplied directly (one-time, unassigned tasks).
+        Falls back to the existing instance's room/house for partial updates
+        that don't touch either field."""
+        instance = serializer.instance
+        if "room" in serializer.validated_data:
+            room = serializer.validated_data.get("room")
+        else:
+            room = instance.room if instance else None
+
+        if room is not None:
+            house = room.house
+        elif "house" in serializer.validated_data:
+            house = serializer.validated_data.get("house")
+        else:
+            house = instance.house if instance else None
+
+        if house is None or not house.members.filter(pk=self.request.user.pk).exists():
+            raise PermissionDenied("You are not a member of that house.")
+        return house
+
+    def _check_assigned_to(self, house, users):
+        if not users:
+            return
+        member_ids = set(house.members.values_list("pk", flat=True))
+        if any(u.pk not in member_ids for u in users):
+            raise PermissionDenied("Assigned users must be members of the house.")
 
     def perform_create(self, serializer):
-        room = serializer.validated_data.get("room")
-        if room is None or not room.house.members.filter(pk=self.request.user.pk).exists():
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You are not a member of that house.")
-        serializer.save()
+        house = self._resolve_house(serializer)
+        self._check_assigned_to(house, serializer.validated_data.get("assigned_to"))
+        serializer.save(house=house)
+
+    def perform_update(self, serializer):
+        house = self._resolve_house(serializer)
+        self._check_assigned_to(house, serializer.validated_data.get("assigned_to"))
+        serializer.save(house=house)
 
     @action(detail=True, methods=["post"])
     def complete(self, request, pk=None):
         chore = self.get_object()
         completion = ChoreCompletion.objects.create(chore=chore, user=request.user)
+        if chore.task_type == Chore.TASK_ONE_TIME:
+            chore.is_active = False
+            chore.save(update_fields=["is_active"])
         emails.send_completion_notification(completion)
         return Response(
             {"detail": f"'{chore.name}' marked as done.",
@@ -211,22 +228,74 @@ def dashboard(request):
     than from generated occurrences.
     """
     chores = Chore.objects.filter(
-        room__house__members=request.user, is_active=True
-    ).select_related("room__house").distinct()
+        house__members=request.user, is_active=True
+    ).select_related("room", "house").distinct()
     due = sorted((c for c in chores if c.is_due), key=lambda c: c.due_date)
     upcoming = sorted((c for c in chores if not c.is_due), key=lambda c: c.due_date)[:10]
+
+    since = timezone.now() - timedelta(days=7)
+    completions = list(
+        ChoreCompletion.objects.filter(chore__house__members=request.user, completed_at__gte=since)
+        .select_related("user", "chore", "chore__room")
+        .distinct()
+        .order_by("-completed_at")
+    )
+    totals = {}
+    for c in completions:
+        entry = totals.setdefault(c.user_id, {"user": c.user, "total": 0})
+        entry["total"] += 1
+    scoreboard = sorted(
+        ({"user": UserSerializer(v["user"]).data, "total": v["total"]} for v in totals.values()),
+        key=lambda s: s["total"], reverse=True,
+    )
+
     return Response({
         "due": ChoreSerializer(due, many=True).data,
         "upcoming": ChoreSerializer(upcoming, many=True).data,
+        "scoreboard": scoreboard,
+        "recent_completions": ChoreCompletionSerializer(completions[:10], many=True).data,
     })
+
+
+@api_view(["GET"])
+def weekly_overview(request):
+    """Upcoming tasks for today through the next 6 days, one bucket per day.
+
+    Each chore appears in exactly one day's bucket — its next due date,
+    clamped to today if it's already overdue — matching the single-occurrence
+    due-ness model used everywhere else (no stacking of missed occurrences).
+    """
+    chores = Chore.objects.filter(
+        house__members=request.user, is_active=True
+    ).select_related("room", "house").distinct()
+
+    today = timezone.localdate()
+    buckets = {today + timedelta(days=i): [] for i in range(7)}
+    for c in chores:
+        bucket_date = max(c.due_date, today)
+        if bucket_date in buckets:
+            buckets[bucket_date].append(c)
+
+    days = []
+    for i in range(7):
+        date = today + timedelta(days=i)
+        chores_for_day = sorted(buckets[date], key=lambda c: c.name)
+        days.append({
+            "date": date.isoformat(),
+            "weekday": date.strftime("%A"),
+            "is_today": i == 0,
+            "chores": ChoreSerializer(chores_for_day, many=True).data,
+        })
+
+    return Response({"days": days})
 
 
 @api_view(["POST"])
 def send_my_overview(request):
     """Manually trigger the outstanding-chores overview email for yourself."""
     chores = Chore.objects.filter(
-        room__house__members=request.user, is_active=True
-    ).select_related("room__house").distinct()
+        house__members=request.user, is_active=True
+    ).select_related("room", "house").distinct()
     due = [c for c in chores if c.is_due]
     if not request.user.email:
         return Response({"detail": "Your account has no email address."}, status=400)

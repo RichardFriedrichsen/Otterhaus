@@ -89,6 +89,10 @@ REST_FRAMEWORK = {
 # Frontend origin (for CORS and for links inside emails)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
+if DEBUG:
+    # Vite picks the next free port (5174, 5175, ...) when 5173 is taken,
+    # so allow any localhost port in development instead of just FRONTEND_URL.
+    CORS_ALLOWED_ORIGIN_REGEXES = [r"^http://localhost:\d+$", r"^http://127\.0\.0\.1:\d+$"]
 
 # --- Email / Gmail ---------------------------------------------------------
 # Uses Gmail SMTP. Create an "App Password" in your Google account

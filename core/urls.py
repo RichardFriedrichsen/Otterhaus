@@ -14,8 +14,8 @@ urlpatterns = [
     path("auth/me/", views.me),
     path("auth/password-reset/", views.password_reset_request),
     path("auth/password-reset/confirm/", views.password_reset_confirm),
-    path("invites/accept/", views.accept_invite),
     path("dashboard/", views.dashboard),
+    path("weekly-overview/", views.weekly_overview),
     path("overview-email/", views.send_my_overview),
     path("", include(router.urls)),
 ]

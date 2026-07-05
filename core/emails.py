@@ -2,26 +2,11 @@
 
 Emails are sent through the Gmail SMTP settings in config/settings.py.
 `fail_silently=True` is used for notification mail so a Gmail hiccup never
-breaks the API request itself; password-reset and invite mail raise errors
-because the user needs to know if those failed.
+breaks the API request itself; password-reset mail raises errors because
+the user needs to know if that failed.
 """
 from django.conf import settings
 from django.core.mail import send_mail
-
-
-def send_invite_email(invite):
-    link = f"{settings.FRONTEND_URL}/accept-invite?token={invite.token}"
-    send_mail(
-        subject=f"You're invited to join '{invite.house.name}' on Choreboard",
-        message=(
-            f"{invite.invited_by.username} invited you to the house "
-            f"'{invite.house.name}' on Choreboard.\n\n"
-            f"Open this link, sign in (or register with this email address), "
-            f"and the invite will be applied:\n{link}\n"
-        ),
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[invite.email],
-    )
 
 
 def send_password_reset_email(user, uid, token):
@@ -41,7 +26,7 @@ def send_password_reset_email(user, uid, token):
 def send_completion_notification(completion):
     """Notify all other members of the house that a chore was completed."""
     chore = completion.chore
-    house = chore.room.house
+    house = chore.house
     recipients = [
         m.email
         for m in house.members.exclude(pk=completion.user.pk)
@@ -49,12 +34,16 @@ def send_completion_notification(completion):
     ]
     if not recipients:
         return
+    where = f" in {chore.room.name}" if chore.room else ""
+    recurs = (
+        f"It will be due again in {chore.interval_days} days.\n"
+        if chore.task_type != chore.TASK_ONE_TIME else ""
+    )
     send_mail(
         subject=f"{completion.user.username} completed '{chore.name}'",
         message=(
             f"{completion.user.username} just completed the chore "
-            f"'{chore.name}' in {chore.room.name} ({house.name}).\n\n"
-            f"It will be due again in {chore.interval_days} days.\n"
+            f"'{chore.name}'{where} ({house.name}).\n\n{recurs}"
         ),
         from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=recipients,
@@ -70,9 +59,8 @@ def send_overview_email(user, due_chores):
     for chore in due_chores:
         overdue = chore.days_overdue
         when = "due today" if overdue == 0 else f"overdue by {overdue} day(s)"
-        lines.append(
-            f"- {chore.name} — {chore.room.house.name} / {chore.room.name} ({when})"
-        )
+        where = f"{chore.house.name} / {chore.room.name}" if chore.room else chore.house.name
+        lines.append(f"- {chore.name} — {where} ({when})")
     send_mail(
         subject=f"Choreboard: {len(due_chores)} chore(s) waiting for you",
         message=(

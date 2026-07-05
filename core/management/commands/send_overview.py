@@ -18,8 +18,8 @@ class Command(BaseCommand):
         sent = 0
         for user in User.objects.exclude(email=""):
             chores = Chore.objects.filter(
-                room__house__members=user, is_active=True
-            ).select_related("room__house").distinct()
+                house__members=user, is_active=True
+            ).select_related("room", "house").distinct()
             due = [c for c in chores if c.is_due]
             if due:
                 emails.send_overview_email(user, due)
