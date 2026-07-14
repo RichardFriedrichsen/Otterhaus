@@ -5,6 +5,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from django.utils.functional import cached_property
 
 ACCESS_CODE_ALPHABET = string.ascii_uppercase + string.digits
 
@@ -99,7 +100,7 @@ class Chore(models.Model):
             return f"{self.name} (one time)"
         return f"{self.name} (every {self.interval_days}d)"
 
-    @property
+    @cached_property
     def last_completion(self):
         return self.completions.order_by("-completed_at").first()
 

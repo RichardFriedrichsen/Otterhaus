@@ -4,6 +4,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
@@ -103,7 +104,8 @@ class HouseViewSet(viewsets.ModelViewSet):
     serializer_class = HouseSerializer
 
     def get_queryset(self):
-        return House.objects.filter(members=self.request.user).distinct()
+        return House.objects.filter(members=self.request.user) \
+            .prefetch_related("members", "rooms__chores__assigned_to").distinct()
 
     def perform_create(self, serializer):
         house = serializer.save(created_by=self.request.user)
@@ -150,7 +152,8 @@ class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
 
     def get_queryset(self):
-        return Room.objects.filter(house__members=self.request.user).distinct()
+        return Room.objects.filter(house__members=self.request.user) \
+            .prefetch_related("chores__assigned_to").distinct()
 
     def perform_create(self, serializer):
         house = serializer.validated_data.get("house")
@@ -163,7 +166,8 @@ class ChoreViewSet(viewsets.ModelViewSet):
     serializer_class = ChoreSerializer
 
     def get_queryset(self):
-        return Chore.objects.filter(house__members=self.request.user).distinct()
+        return Chore.objects.filter(house__members=self.request.user) \
+            .select_related("room", "house").prefetch_related("assigned_to").distinct()
 
     def _resolve_house(self, serializer):
         """A chore's house is always the room's house when a room is given,
@@ -219,6 +223,42 @@ class ChoreViewSet(viewsets.ModelViewSet):
         )
 
 
+def _person_filter(request):
+    """Resolve ?assigned_to= into a user id to filter chores by, or None for
+    everyone. Defaults to the requesting user, so dashboards show just their
+    own stuff unless they explicitly pick 'all' or someone else."""
+    raw = request.GET.get("assigned_to")
+    if raw == "all":
+        return None
+    if not raw:
+        return request.user.id
+    try:
+        return int(raw)
+    except ValueError:
+        return request.user.id
+
+
+def _house_people(request):
+    """Everyone sharing at least one house with the requesting user
+    (including the user themself) — used to populate person-filter dropdowns."""
+    return list(
+        User.objects.filter(houses__members=request.user)
+        .distinct().order_by("username").values("id", "username")
+    )
+
+
+def _chores_for(request):
+    chores = Chore.objects.filter(
+        house__members=request.user, is_active=True
+    ).select_related("room", "house").prefetch_related("assigned_to")
+    person = _person_filter(request)
+    if person is not None:
+        # A chore assigned to nobody in particular counts as assigned to
+        # everyone, so it still shows up under any specific person's filter.
+        chores = chores.filter(Q(assigned_to=person) | Q(assigned_to__isnull=True))
+    return chores.distinct()
+
+
 @api_view(["GET"])
 def dashboard(request):
     """Every chore that is currently due across the user's houses.
@@ -226,10 +266,11 @@ def dashboard(request):
     An overdue chore appears exactly once no matter how many intervals have
     passed, because due-ness is derived from the last completion date rather
     than from generated occurrences.
+
+    Filtered to the requesting user by default; pass ?assigned_to=<user id>
+    for someone else, or ?assigned_to=all for everyone.
     """
-    chores = Chore.objects.filter(
-        house__members=request.user, is_active=True
-    ).select_related("room", "house").distinct()
+    chores = _chores_for(request)
     due = sorted((c for c in chores if c.is_due), key=lambda c: c.due_date)
     upcoming = sorted((c for c in chores if not c.is_due), key=lambda c: c.due_date)[:10]
 
@@ -254,6 +295,7 @@ def dashboard(request):
         "upcoming": ChoreSerializer(upcoming, many=True).data,
         "scoreboard": scoreboard,
         "recent_completions": ChoreCompletionSerializer(completions[:10], many=True).data,
+        "people": _house_people(request),
     })
 
 
@@ -264,10 +306,11 @@ def weekly_overview(request):
     Each chore appears in exactly one day's bucket — its next due date,
     clamped to today if it's already overdue — matching the single-occurrence
     due-ness model used everywhere else (no stacking of missed occurrences).
+
+    Filtered to the requesting user by default; pass ?assigned_to=<user id>
+    for someone else, or ?assigned_to=all for everyone.
     """
-    chores = Chore.objects.filter(
-        house__members=request.user, is_active=True
-    ).select_related("room", "house").distinct()
+    chores = _chores_for(request)
 
     today = timezone.localdate()
     buckets = {today + timedelta(days=i): [] for i in range(7)}
@@ -287,7 +330,7 @@ def weekly_overview(request):
             "chores": ChoreSerializer(chores_for_day, many=True).data,
         })
 
-    return Response({"days": days})
+    return Response({"days": days, "people": _house_people(request)})
 
 
 @api_view(["POST"])
@@ -295,7 +338,7 @@ def send_my_overview(request):
     """Manually trigger the outstanding-chores overview email for yourself."""
     chores = Chore.objects.filter(
         house__members=request.user, is_active=True
-    ).select_related("room", "house").distinct()
+    ).select_related("room", "house").prefetch_related("assigned_to").distinct()
     due = [c for c in chores if c.is_due]
     if not request.user.email:
         return Response({"detail": "Your account has no email address."}, status=400)
