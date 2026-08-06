@@ -62,12 +62,13 @@ class ChoreSerializer(serializers.ModelSerializer):
         fields = (
             "id", "task_type", "room", "room_name", "house", "house_name", "name",
             "description", "interval_days", "recurrence_type", "start_date",
-            "is_active", "assigned_to", "assigned_to_detail", "due_date",
+            "is_active", "pinned_due", "assigned_to", "assigned_to_detail", "due_date",
             "is_due", "days_overdue", "last_completed_by", "last_completed_at",
         )
         extra_kwargs = {
             "room": {"required": False, "allow_null": True},
             "is_active": {"default": True},
+            "pinned_due": {"required": False},
         }
 
     def validate(self, attrs):

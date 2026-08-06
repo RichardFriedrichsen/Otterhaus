@@ -215,6 +215,9 @@ class ChoreViewSet(viewsets.ModelViewSet):
         if chore.task_type == Chore.TASK_ONE_TIME:
             chore.is_active = False
             chore.save(update_fields=["is_active"])
+        elif chore.pinned_due:
+            chore.pinned_due = False
+            chore.save(update_fields=["pinned_due"])
         emails.send_completion_notification(completion)
         return Response(
             {"detail": f"'{chore.name}' marked as done.",

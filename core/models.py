@@ -94,6 +94,11 @@ class Chore(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    pinned_due = models.BooleanField(
+        default=False,
+        help_text="Manually bumped to today's due list ahead of its normal schedule. "
+                   "Cleared automatically the next time it's completed.",
+    )
 
     def __str__(self):
         if self.task_type == self.TASK_ONE_TIME:
@@ -120,10 +125,17 @@ class Chore(models.Model):
         if self.task_type == self.TASK_ONE_TIME:
             return timezone.localtime(self.created_at).date()
         if self.recurrence_type == self.RECURRENCE_FIXED and self.start_date:
-            return self._fixed_due_date(last)
-        if last is None:
-            return timezone.localtime(self.created_at).date()
-        return timezone.localtime(last.completed_at).date() + timedelta(days=self.interval_days)
+            natural = self._fixed_due_date(last)
+        elif last is None:
+            natural = timezone.localtime(self.created_at).date()
+        else:
+            natural = timezone.localtime(last.completed_at).date() + timedelta(days=self.interval_days)
+        if self.pinned_due:
+            # Manually bumped to today's list — but never *later* than its
+            # real schedule, so an already-overdue chore keeps its true
+            # overdue date instead of looking merely "due today".
+            return min(natural, timezone.localdate())
+        return natural
 
     def _fixed_due_date(self, last):
         """Next occurrence on the fixed start_date + N*interval_days schedule."""
