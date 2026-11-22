@@ -18,10 +18,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import emails
-from .models import Chore, ChoreCompletion, House, Membership, Room
+from .models import Chore, ChoreCompletion, House, Ingredient, Membership, Recipe, RecipeCategory, Room
 from .serializers import (
-    ChoreCompletionSerializer, ChoreSerializer, HouseSerializer,
-    RegisterSerializer, RoomSerializer, UserSerializer,
+    ChoreCompletionSerializer, ChoreSerializer, HouseSerializer, IngredientSerializer,
+    RecipeCategorySerializer, RecipeSerializer, RegisterSerializer, RoomSerializer, UserSerializer,
 )
 
 
@@ -224,6 +224,81 @@ class ChoreViewSet(viewsets.ModelViewSet):
              "chore": ChoreSerializer(chore).data},
             status=201,
         )
+
+
+# --------------------------------------------------------------------------
+# Recipes, categories & ingredients
+# --------------------------------------------------------------------------
+
+class RecipeCategoryViewSet(viewsets.ModelViewSet):
+    serializer_class = RecipeCategorySerializer
+
+    def get_queryset(self):
+        return RecipeCategory.objects.filter(house__members=self.request.user).distinct()
+
+    def perform_create(self, serializer):
+        house = serializer.validated_data.get("house")
+        if house is None or not house.members.filter(pk=self.request.user.pk).exists():
+            raise PermissionDenied("You are not a member of that house.")
+        serializer.save()
+
+
+class IngredientViewSet(viewsets.ModelViewSet):
+    serializer_class = IngredientSerializer
+
+    def get_queryset(self):
+        return Ingredient.objects.filter(house__members=self.request.user).distinct()
+
+    def perform_create(self, serializer):
+        house = serializer.validated_data.get("house")
+        if house is None or not house.members.filter(pk=self.request.user.pk).exists():
+            raise PermissionDenied("You are not a member of that house.")
+        serializer.save()
+
+
+class RecipeViewSet(viewsets.ModelViewSet):
+    serializer_class = RecipeSerializer
+
+    def get_queryset(self):
+        qs = Recipe.objects.filter(house__members=self.request.user) \
+            .select_related("house", "category").prefetch_related("ingredients")
+
+        search = self.request.GET.get("search", "").strip()
+        if search:
+            qs = qs.filter(name__icontains=search)
+
+        category = self.request.GET.get("category")
+        if category:
+            qs = qs.filter(category_id=category)
+
+        ingredient_ids = [v for v in self.request.GET.getlist("ingredient") if v]
+        if ingredient_ids:
+            # Any recipe using at least one of the selected ingredients.
+            qs = qs.filter(ingredients__id__in=ingredient_ids)
+
+        return qs.distinct()
+
+    def _check_house_refs(self, house, serializer):
+        category = serializer.validated_data.get("category")
+        if category is not None and category.house_id != house.id:
+            raise PermissionDenied("Category must belong to the same house as the recipe.")
+        ingredients = serializer.validated_data.get("ingredients")
+        if ingredients and any(i.house_id != house.id for i in ingredients):
+            raise PermissionDenied("Ingredients must belong to the same house as the recipe.")
+
+    def perform_create(self, serializer):
+        house = serializer.validated_data.get("house")
+        if house is None or not house.members.filter(pk=self.request.user.pk).exists():
+            raise PermissionDenied("You are not a member of that house.")
+        self._check_house_refs(house, serializer)
+        serializer.save(house=house, created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        house = serializer.validated_data.get("house", serializer.instance.house)
+        if house is None or not house.members.filter(pk=self.request.user.pk).exists():
+            raise PermissionDenied("You are not a member of that house.")
+        self._check_house_refs(house, serializer)
+        serializer.save()
 
 
 def _person_filter(request):

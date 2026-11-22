@@ -7,6 +7,9 @@ router = DefaultRouter()
 router.register("houses", views.HouseViewSet, basename="house")
 router.register("rooms", views.RoomViewSet, basename="room")
 router.register("chores", views.ChoreViewSet, basename="chore")
+router.register("recipe-categories", views.RecipeCategoryViewSet, basename="recipe-category")
+router.register("ingredients", views.IngredientViewSet, basename="ingredient")
+router.register("recipes", views.RecipeViewSet, basename="recipe")
 
 urlpatterns = [
     path("auth/register/", views.RegisterView.as_view()),

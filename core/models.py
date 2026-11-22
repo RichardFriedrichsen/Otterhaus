@@ -160,6 +160,55 @@ class Chore(models.Model):
         return (timezone.localdate() - self.due_date).days
 
 
+class RecipeCategory(models.Model):
+    house = models.ForeignKey(House, on_delete=models.CASCADE, related_name="recipe_categories")
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        unique_together = ("house", "name")
+        verbose_name_plural = "recipe categories"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Ingredient(models.Model):
+    house = models.ForeignKey(House, on_delete=models.CASCADE, related_name="ingredients")
+    name = models.CharField(max_length=100)
+    location = models.CharField(
+        max_length=150, blank=True,
+        help_text="Where to find it, e.g. 'Dairy aisle' or 'Pantry'.",
+    )
+
+    class Meta:
+        unique_together = ("house", "name")
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Recipe(models.Model):
+    house = models.ForeignKey(House, on_delete=models.CASCADE, related_name="recipes")
+    name = models.CharField(max_length=150)
+    category = models.ForeignKey(
+        RecipeCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name="recipes"
+    )
+    ingredients = models.ManyToManyField(Ingredient, blank=True, related_name="recipes")
+    instructions = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="recipes_created"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class ChoreCompletion(models.Model):
     chore = models.ForeignKey(Chore, on_delete=models.CASCADE, related_name="completions")
     user = models.ForeignKey(

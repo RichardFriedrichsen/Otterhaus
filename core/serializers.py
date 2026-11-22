@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import Chore, ChoreCompletion, House, Room
+from .models import Chore, ChoreCompletion, House, Ingredient, Recipe, RecipeCategory, Room
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -111,6 +111,40 @@ class RoomSerializer(serializers.ModelSerializer):
     class Meta:
         model = Room
         fields = ("id", "house", "name", "chores")
+        extra_kwargs = {"house": {"required": False}}
+
+
+class RecipeCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecipeCategory
+        fields = ("id", "house", "name")
+        extra_kwargs = {"house": {"required": False}}
+
+
+class IngredientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Ingredient
+        fields = ("id", "house", "name", "location")
+        extra_kwargs = {"house": {"required": False}}
+
+
+class RecipeSerializer(serializers.ModelSerializer):
+    house_name = serializers.CharField(source="house.name", read_only=True, default=None)
+    category = serializers.PrimaryKeyRelatedField(
+        queryset=RecipeCategory.objects.all(), required=False, allow_null=True
+    )
+    category_name = serializers.CharField(source="category.name", read_only=True, default=None)
+    ingredients = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=Ingredient.objects.all(), required=False
+    )
+    ingredients_detail = IngredientSerializer(source="ingredients", many=True, read_only=True)
+
+    class Meta:
+        model = Recipe
+        fields = (
+            "id", "house", "house_name", "name", "category", "category_name",
+            "ingredients", "ingredients_detail", "instructions", "created_at",
+        )
         extra_kwargs = {"house": {"required": False}}
 
 
