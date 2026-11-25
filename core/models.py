@@ -3,6 +3,7 @@ import string
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
 from django.utils.functional import cached_property
@@ -195,7 +196,9 @@ class Recipe(models.Model):
     category = models.ForeignKey(
         RecipeCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name="recipes"
     )
-    ingredients = models.ManyToManyField(Ingredient, blank=True, related_name="recipes")
+    ingredients = models.ManyToManyField(
+        Ingredient, through="RecipeIngredient", blank=True, related_name="recipes"
+    )
     instructions = models.TextField(blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="recipes_created"
@@ -207,6 +210,41 @@ class Recipe(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class RecipeIngredient(models.Model):
+    UNIT_GRAM = "g"
+    UNIT_KILOGRAM = "kg"
+    UNIT_MILLILITER = "ml"
+    UNIT_LITER = "l"
+    UNIT_TEASPOON = "tsp"
+    UNIT_TABLESPOON = "tbsp"
+    UNIT_CUP = "cup"
+    UNIT_PIECE = "piece"
+    UNIT_PINCH = "pinch"
+    UNIT_CHOICES = [
+        (UNIT_GRAM, "g"),
+        (UNIT_KILOGRAM, "kg"),
+        (UNIT_MILLILITER, "ml"),
+        (UNIT_LITER, "l"),
+        (UNIT_TEASPOON, "tsp"),
+        (UNIT_TABLESPOON, "tbsp"),
+        (UNIT_CUP, "cup"),
+        (UNIT_PIECE, "piece"),
+        (UNIT_PINCH, "pinch"),
+    ]
+
+    recipe = models.ForeignKey(Recipe, on_delete=models.CASCADE, related_name="recipe_ingredients")
+    ingredient = models.ForeignKey(Ingredient, on_delete=models.CASCADE, related_name="recipe_ingredients")
+    amount = models.FloatField(validators=[MinValueValidator(0.01)])
+    unit = models.CharField(max_length=10, choices=UNIT_CHOICES, default=UNIT_GRAM)
+
+    class Meta:
+        unique_together = ("recipe", "ingredient")
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.amount} {self.unit} {self.ingredient.name}"
 
 
 class ChoreCompletion(models.Model):

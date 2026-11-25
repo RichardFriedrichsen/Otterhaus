@@ -261,7 +261,7 @@ class RecipeViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Recipe.objects.filter(house__members=self.request.user) \
-            .select_related("house", "category").prefetch_related("ingredients")
+            .select_related("house", "category").prefetch_related("recipe_ingredients__ingredient")
 
         search = self.request.GET.get("search", "").strip()
         if search:
@@ -282,8 +282,8 @@ class RecipeViewSet(viewsets.ModelViewSet):
         category = serializer.validated_data.get("category")
         if category is not None and category.house_id != house.id:
             raise PermissionDenied("Category must belong to the same house as the recipe.")
-        ingredients = serializer.validated_data.get("ingredients")
-        if ingredients and any(i.house_id != house.id for i in ingredients):
+        ingredients_data = serializer.validated_data.get("recipe_ingredients")
+        if ingredients_data and any(item["ingredient"].house_id != house.id for item in ingredients_data):
             raise PermissionDenied("Ingredients must belong to the same house as the recipe.")
 
     def perform_create(self, serializer):

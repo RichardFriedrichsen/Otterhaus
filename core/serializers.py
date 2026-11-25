@@ -2,7 +2,9 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import Chore, ChoreCompletion, House, Ingredient, Recipe, RecipeCategory, Room
+from .models import (
+    Chore, ChoreCompletion, House, Ingredient, Recipe, RecipeCategory, RecipeIngredient, Room,
+)
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -128,24 +130,52 @@ class IngredientSerializer(serializers.ModelSerializer):
         extra_kwargs = {"house": {"required": False}}
 
 
+class RecipeIngredientSerializer(serializers.ModelSerializer):
+    ingredient = serializers.PrimaryKeyRelatedField(queryset=Ingredient.objects.all())
+    ingredient_name = serializers.CharField(source="ingredient.name", read_only=True)
+    ingredient_location = serializers.CharField(source="ingredient.location", read_only=True)
+
+    class Meta:
+        model = RecipeIngredient
+        fields = ("id", "ingredient", "ingredient_name", "ingredient_location", "amount", "unit")
+
+
 class RecipeSerializer(serializers.ModelSerializer):
     house_name = serializers.CharField(source="house.name", read_only=True, default=None)
     category = serializers.PrimaryKeyRelatedField(
         queryset=RecipeCategory.objects.all(), required=False, allow_null=True
     )
     category_name = serializers.CharField(source="category.name", read_only=True, default=None)
-    ingredients = serializers.PrimaryKeyRelatedField(
-        many=True, queryset=Ingredient.objects.all(), required=False
-    )
-    ingredients_detail = IngredientSerializer(source="ingredients", many=True, read_only=True)
+    recipe_ingredients = RecipeIngredientSerializer(many=True, required=False)
 
     class Meta:
         model = Recipe
         fields = (
             "id", "house", "house_name", "name", "category", "category_name",
-            "ingredients", "ingredients_detail", "instructions", "created_at",
+            "recipe_ingredients", "instructions", "created_at",
         )
         extra_kwargs = {"house": {"required": False}}
+
+    def create(self, validated_data):
+        ingredients_data = validated_data.pop("recipe_ingredients", [])
+        recipe = Recipe.objects.create(**validated_data)
+        self._sync_ingredients(recipe, ingredients_data)
+        return recipe
+
+    def update(self, instance, validated_data):
+        ingredients_data = validated_data.pop("recipe_ingredients", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if ingredients_data is not None:
+            instance.recipe_ingredients.all().delete()
+            self._sync_ingredients(instance, ingredients_data)
+        return instance
+
+    def _sync_ingredients(self, recipe, ingredients_data):
+        RecipeIngredient.objects.bulk_create([
+            RecipeIngredient(recipe=recipe, **item) for item in ingredients_data
+        ])
 
 
 class HouseSerializer(serializers.ModelSerializer):
